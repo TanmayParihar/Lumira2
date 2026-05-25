@@ -43,6 +43,17 @@ def svc_set(name: str, enabled: bool) -> None:
     except Exception:
         st.error("Redis unreachable — cannot save service state")
 
+def purge_queue(queue_name: str) -> int:
+    """Delete all pending tasks from a Redis-backed Celery queue. Returns count removed."""
+    try:
+        r = _rdb()
+        n = r.llen(queue_name)
+        if n:
+            r.delete(queue_name)
+        return n
+    except Exception:
+        return 0
+
 st.set_page_config(
     page_title="Lumira Dashboard",
     page_icon="🛡️",
@@ -759,7 +770,7 @@ elif page == PAGES[4]:
 
     # ── Service ON / OFF toggles ──────────────────────────────────────────
     st.subheader("🔌 Service Control")
-    st.caption("Toggle scheduled ingestion on/off. Changes take effect on the next scheduled run.")
+    st.caption("Stop disables the scheduled task **and** purges any queued work from that run.")
 
     SERVICES = {
         "rss":     ("RSS Feeds",  "Every 5 min"),
@@ -772,19 +783,42 @@ elif page == PAGES[4]:
     for col, (key, (label, schedule)) in zip(svc_cols, SERVICES.items()):
         with col:
             current = svc_enabled(key)
-            status_color = "🟢" if current else "🔴"
             st.markdown(f"**{label}**  \n`{schedule}`")
             if current:
                 if st.button(f"⏹ Stop {label}", key=f"svc_stop_{key}",
                              use_container_width=True, type="primary"):
                     svc_set(key, False)
+                    # Also flush the processing queue so already-queued items
+                    # from this source don't keep running after stop
+                    n = purge_queue("processing")
+                    st.toast(f"Stopped {label}" + (f" — purged {n} queued items" if n else ""))
                     st.rerun()
             else:
                 if st.button(f"▶ Start {label}", key=f"svc_start_{key}",
                              use_container_width=True):
                     svc_set(key, True)
                     st.rerun()
-            st.caption(f"{status_color} {'Running' if current else 'Stopped'}")
+            st.caption(f"{'🟢 Running' if current else '🔴 Stopped'}")
+
+    # Show queue depths + purge button
+    try:
+        _r = _rdb()
+        q_proc = _r.llen("processing")
+        q_ing  = _r.llen("ingestion")
+        q_cel  = _r.llen("celery")
+    except Exception:
+        q_proc = q_ing = q_cel = "?"
+
+    qc1, qc2, qc3, qc4 = st.columns([1, 1, 1, 1])
+    qc1.metric("Processing queue", q_proc)
+    qc2.metric("Ingestion queue", q_ing)
+    qc3.metric("Default queue", q_cel)
+    with qc4:
+        st.write("")   # spacer
+        if st.button("🗑 Purge all queues", type="secondary", use_container_width=True):
+            total = purge_queue("processing") + purge_queue("ingestion") + purge_queue("celery")
+            st.toast(f"Purged {total} queued tasks")
+            st.rerun()
 
     st.divider()
     # ── Manual triggers ───────────────────────────────────────────────────
