@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-import math
+import json as _json
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -54,100 +54,254 @@ def dti_colour(score: float) -> str:
     return "#2ecc71"
 
 
-# ── Globe map helpers (Plotly orthographic projection) ────────────────────
-# True 3D sphere — draggable, no API key needed, Plotly already installed.
-# Uses orthographic projection which renders the Earth as a genuine sphere
-# just like Google Earth, with full rotation via mouse drag.
+# ── NASA WorldWind globe helpers ──────────────────────────────────────────
+# Self-contained HTML pages rendered in Streamlit via st.components.v1.html.
+# WorldWind JS loaded from jsDelivr CDN (falls back to NASA CDN).
+# Military/stealth HUD: corner brackets, classification banner, live coords,
+# scanline texture, colour-coded threat legend with neon glow.
 
-def _globe_layout(center_lon: float = 82.0, center_lat: float = 22.0,
-                  height: int = 580) -> dict:
-    """
-    Shared Plotly layout for both the Events and Assets globe maps.
-    Orthographic projection = true sphere.  Country outlines + lat/lon grid
-    give the 'wireframe of Earth' look on a near-black background.
-    """
-    return dict(
-        geo=dict(
-            projection_type="orthographic",
-            projection=dict(
-                rotation=dict(lon=center_lon, lat=center_lat, roll=0)
-            ),
-            # ── Land / ocean colours ──────────────────────────────────────
-            showland=True,
-            landcolor="rgb(12, 22, 38)",        # very dark navy — sphere visible
-            showocean=True,
-            oceancolor="rgb(5, 10, 22)",         # slightly different dark
-            showlakes=True,
-            lakecolor="rgb(5, 10, 22)",
-            # ── Wireframe outlines ────────────────────────────────────────
-            showcountries=True,
-            countrycolor="rgba(0, 200, 255, 0.50)",   # cyan country borders
-            countrywidth=0.7,
-            showcoastlines=True,
-            coastlinecolor="rgba(0, 230, 255, 0.70)",  # brighter coastlines
-            coastlinewidth=0.9,
-            showframe=False,
-            bgcolor="rgb(0, 0, 0)",                    # black space background
-            # ── Lat / lon grid (adds to the 'wireframe' feel) ────────────
-            lataxis=dict(
-                showgrid=True,
-                gridcolor="rgba(0, 130, 190, 0.20)",
-                dtick=30,
-            ),
-            lonaxis=dict(
-                showgrid=True,
-                gridcolor="rgba(0, 130, 190, 0.20)",
-                dtick=30,
-            ),
-        ),
-        paper_bgcolor="rgb(0, 5, 15)",
-        plot_bgcolor="rgb(0, 5, 15)",
+_WW_CSS = """
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { width:100%; height:HHpx; background:#00000f; overflow:hidden;
+             font-family:'Courier New',Courier,monospace; }
+canvas#ww { width:100% !important; height:HHpx !important; display:block; }
+.hud { position:fixed; top:0; left:0; right:0; bottom:0;
+       pointer-events:none; z-index:20; }
+.corner { position:absolute; width:28px; height:28px;
+          border-color:rgba(0,230,140,0.65); border-style:solid; }
+.tl { top:8px;    left:8px;   border-width:2px 0 0 2px; }
+.tr { top:8px;    right:8px;  border-width:2px 2px 0 0; }
+.bl { bottom:8px; left:8px;   border-width:0 0 2px 2px; }
+.br { bottom:8px; right:8px;  border-width:0 2px 2px 0; }
+.cls { position:absolute; top:10px; left:50%; transform:translateX(-50%);
+       color:rgba(0,255,128,0.88); font-size:10px; font-weight:bold;
+       letter-spacing:3px; white-space:nowrap;
+       text-shadow:0 0 12px rgba(0,255,128,0.55); }
+.sysinfo { position:absolute; top:30px; left:14px;
+           color:rgba(0,200,110,0.62); font-size:8px; line-height:1.8;
+           letter-spacing:1px; text-shadow:0 0 6px rgba(0,200,110,0.3); }
+.coords  { position:absolute; bottom:14px; left:14px;
+           color:rgba(0,230,140,0.80); font-size:9px; line-height:1.8;
+           text-shadow:0 0 6px rgba(0,230,140,0.4); }
+.legend  { position:absolute; top:34px; right:12px; min-width:178px;
+           background:rgba(0,10,5,0.84); border:1px solid rgba(0,220,130,0.22);
+           padding:9px 13px; font-size:9px; color:rgba(0,220,130,0.85);
+           backdrop-filter:blur(3px); }
+.ltitle  { font-weight:bold; letter-spacing:2px; font-size:8px;
+           border-bottom:1px solid rgba(0,220,130,0.18);
+           padding-bottom:4px; margin-bottom:5px; }
+.li  { display:flex; align-items:center; gap:7px; margin:3px 0; }
+.ld  { width:9px; height:9px; border-radius:50%; flex-shrink:0; }
+.scan { position:absolute; top:0; left:0; right:0; bottom:0; pointer-events:none;
+        background:repeating-linear-gradient(0deg,transparent,transparent 2px,
+        rgba(0,0,0,0.042) 2px,rgba(0,0,0,0.042) 4px); }
+#ldr { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+       color:rgba(0,255,128,0.8); font-size:12px; letter-spacing:3px; z-index:100; }
+"""
+
+_WW_BOOT_JS = """
+function loadWW(cb) {
+  function tryLoad(url, fallback) {
+    var s = document.createElement('script');
+    s.src = url;
+    s.onload = cb;
+    s.onerror = fallback || function(){};
+    document.head.appendChild(s);
+  }
+  tryLoad(
+    'https://cdn.jsdelivr.net/npm/worldwindjs@1.7.0/build/dist/worldwind.min.js',
+    function() {
+      tryLoad('https://files.worldwind.arc.nasa.gov/artifactory/web/0.9.0/worldwind.min.js');
+    }
+  );
+}
+function baseGlobe(canvasId, cLat, cLon, rangeM) {
+  WorldWind.Logger.setLoggingLevel(WorldWind.Logger.LEVEL_WARNING);
+  var wwd = new WorldWind.WorldWindow(canvasId);
+  wwd.navigator.lookAtLocation.latitude  = cLat;
+  wwd.navigator.lookAtLocation.longitude = cLon;
+  wwd.navigator.range = rangeM || 5.8e6;
+  var stars = new WorldWind.StarFieldLayer(); stars.time = new Date();
+  var atmo  = new WorldWind.AtmosphereLayer(); atmo.time = new Date();
+  wwd.addLayer(stars);
+  wwd.addLayer(atmo);
+  wwd.addLayer(new WorldWind.BMNGOneImageLayer());
+  wwd.addLayer(new WorldWind.BMNGLandsatLayer());
+  wwd.addLayer(new WorldWind.CompassLayer());
+  wwd.addLayer(new WorldWind.ViewControlsLayer(wwd));
+  return wwd;
+}
+function hexWW(h, a) {
+  return new WorldWind.Color(
+    parseInt(h.slice(1,3),16)/255,
+    parseInt(h.slice(3,5),16)/255,
+    parseInt(h.slice(5,7),16)/255,
+    a!==undefined ? a : 0.9);
+}
+function bindCoords(wwd, el) {
+  wwd.addEventListener('mousemove', function(ev) {
+    var pp = wwd.canvasCoordinates(ev.clientX, ev.clientY);
+    var to = wwd.pickTerrain(pp).terrainObject();
+    if (to && to.position) {
+      var p = to.position, alt = Math.round(wwd.navigator.range/1000);
+      el.innerHTML =
+        'LAT : '+ p.latitude.toFixed(4) +'&deg;&nbsp;&nbsp; LON : '+ p.longitude.toFixed(4) +'&deg;<br>'+
+        'ALT : '+ alt +' km &nbsp;&nbsp; GRID: '+
+        (Math.floor(p.latitude/10)*10)+'/'+(Math.floor(p.longitude/10)*10);
+    }
+  });
+}
+"""
+
+
+def _ww_page(title_banner: str, sysmode: str, body_js: str,
+             hud_extra: str = "", height: int = 630) -> str:
+    """Wrap WorldWind JS + HUD chrome into a self-contained HTML page."""
+    css = _WW_CSS.replace("HH", str(height))
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<style>{css}</style>
+</head><body>
+<canvas id="ww"></canvas>
+<div class="hud">
+  <div class="scan"></div>
+  <div class="corner tl"></div><div class="corner tr"></div>
+  <div class="corner bl"></div><div class="corner br"></div>
+  <div class="cls">&#9646; {title_banner} &#9646;</div>
+  <div class="sysinfo">SYSTEM &nbsp;: ONLINE<br>MODE &nbsp;&nbsp;&nbsp;: {sysmode}<br>
+    SOURCE &nbsp;: LIVE FEED<br>EPOCH &nbsp;&nbsp;: <span id="ep">--</span></div>
+  <div class="coords" id="coords">LAT : --.----&deg; &nbsp; LON : --.----&deg;<br>
+    ALT : ---- km &nbsp; GRID: --/--</div>
+  {hud_extra}
+  <div class="legend" id="leg"><div class="ltitle">&#9658; CLASSIFICATION</div></div>
+</div>
+<div id="ldr">&#9672; INITIALIZING WORLDWIND &#9672;</div>
+<script>
+(function(){{
+document.getElementById('ep').textContent = new Date().toISOString().slice(0,19)+'Z';
+{_WW_BOOT_JS}
+{body_js}
+loadWW(init);
+}})();
+</script>
+</body></html>"""
+
+
+def _worldwind_events_html(geo_events: list,
+                            center_lat: float = 22.0,
+                            center_lon: float = 82.0,
+                            height: int = 630) -> str:
+    """NASA WorldWind globe — events mode — military/stealth tactical UI."""
+    ev_js  = _json.dumps([
+        {"lat": float(e["latitude"]), "lon": float(e["longitude"]),
+         "type": e.get("event_type", "UNKNOWN"),
+         "title": (e.get("title") or "")[:80],
+         "sev": int(e.get("severity") or 1)}
+        for e in geo_events
+    ])
+    col_js = _json.dumps(EVENT_COLOURS)
+
+    body_js = f"""
+var EVENTS={ev_js}, COLORS={col_js}, C_LAT={center_lat}, C_LON={center_lon};
+function init(){{
+  document.getElementById('ldr').style.display='none';
+  var wwd = baseGlobe('ww', C_LAT, C_LON, 5.8e6);
+  var evtLyr = new WorldWind.RenderableLayer('Events');
+  wwd.addLayer(evtLyr);
+  var byType={{}};
+  EVENTS.forEach(function(e){{
+    var ch = COLORS[e.type]||'#95a5a6';
+    var at = new WorldWind.ShapeAttributes(null);
+    at.drawInterior=true; at.interiorColor=hexWW(ch,0.70);
+    at.drawOutline=true;  at.outlineColor=new WorldWind.Color(1,1,1,0.80);
+    at.outlineWidth=1.5;
+    var hi = new WorldWind.ShapeAttributes(at);
+    hi.interiorColor=hexWW(ch,1.0); hi.outlineWidth=2.5;
+    var r = 45000 + (e.sev-1)*15000;
+    var c = new WorldWind.SurfaceCircle(new WorldWind.Location(e.lat,e.lon),r,at);
+    c.highlightAttributes=hi; c._e=e;
+    evtLyr.addRenderable(c);
+    byType[e.type]=(byType[e.type]||0)+1;
+  }});
+  var legEl=document.getElementById('leg');
+  var lh='<div class="ltitle">&#9658; THREAT CLASSIFICATION</div>';
+  Object.keys(COLORS).forEach(function(t){{
+    if(!byType[t]) return;
+    var cc=COLORS[t];
+    lh+='<div class="li"><div class="ld" style="background:'+cc+';box-shadow:0 0 5px '+cc+'88"></div>'
+       +'<span>'+t+' <span style="opacity:.55">('+byType[t]+')</span></span></div>';
+  }});
+  legEl.innerHTML=lh;
+  bindCoords(wwd, document.getElementById('coords'));
+  wwd.redraw();
+}}
+"""
+    return _ww_page(
+        title_banner="LUMIRA INTELLIGENCE SYSTEM — GLOBAL THREAT MONITOR",
+        sysmode="THREAT VISUALIZATION",
+        body_js=body_js,
         height=height,
-        margin=dict(l=0, r=0, t=0, b=0),
-        legend=dict(
-            bgcolor="rgba(0,5,15,0.7)",
-            font=dict(color="white", size=11),
-            bordercolor="rgba(0,200,255,0.3)",
-            borderwidth=1,
-        ),
     )
 
 
-# ── OSM map helpers (Plotly go.Scattermap — OpenStreetMap, no API key) ────
-def _osm_layout(lat: float = 22.0, lon: float = 82.0,
-                zoom: int = 4, height: int = 540) -> dict:
-    """Shared layout for go.Scattermap with full OpenStreetMap tile detail."""
-    return dict(
-        map=dict(
-            style="open-street-map",      # free OSM tiles, roads/buildings/places
-            center=dict(lat=lat, lon=lon),
-            zoom=zoom,
-        ),
+def _worldwind_assets_html(geo_assets: list,
+                            center_lat: float = 24.0,
+                            center_lon: float = 78.0,
+                            height: int = 630) -> str:
+    """NASA WorldWind globe — assets mode — military/stealth tactical UI."""
+    as_js = _json.dumps([
+        {"lat": float(a["latitude"]), "lon": float(a["longitude"]),
+         "name": (a.get("name") or "Asset"),
+         "type": (a.get("asset_type") or "—"),
+         "radius": float(a.get("alert_radius_km", 5)) * 1000}
+        for a in geo_assets
+    ])
+
+    body_js = f"""
+var ASSETS={as_js}, C_LAT={center_lat}, C_LON={center_lon};
+function init(){{
+  document.getElementById('ldr').style.display='none';
+  var wwd = baseGlobe('ww', C_LAT, C_LON, 5.8e6);
+  var lyr = new WorldWind.RenderableLayer('Assets');
+  wwd.addLayer(lyr);
+  var byType={{}};
+  ASSETS.forEach(function(a){{
+    // Alert-radius ring
+    var rAt = new WorldWind.ShapeAttributes(null);
+    rAt.drawInterior=true;  rAt.interiorColor=new WorldWind.Color(0.20,0.60,0.86,0.07);
+    rAt.drawOutline=true;   rAt.outlineColor=new WorldWind.Color(0.20,0.60,0.86,0.82);
+    rAt.outlineWidth=2;
+    lyr.addRenderable(new WorldWind.SurfaceCircle(
+      new WorldWind.Location(a.lat,a.lon), a.radius, rAt));
+    // Asset dot (gold)
+    var dAt = new WorldWind.ShapeAttributes(null);
+    dAt.drawInterior=true;  dAt.interiorColor=new WorldWind.Color(1,0.84,0,0.92);
+    dAt.drawOutline=true;   dAt.outlineColor=new WorldWind.Color(1,1,1,1);
+    dAt.outlineWidth=2;
+    lyr.addRenderable(new WorldWind.SurfaceCircle(
+      new WorldWind.Location(a.lat,a.lon), 14000, dAt));
+    byType[a.type]=(byType[a.type]||0)+1;
+  }});
+  var legEl=document.getElementById('leg');
+  var lh='<div class="ltitle">&#9658; ASSET CLASSIFICATION</div>';
+  Object.keys(byType).forEach(function(t){{
+    lh+='<div class="li"><div class="ld" style="background:#ffd700;box-shadow:0 0 5px #ffd70088"></div>'
+       +'<span>'+t+' <span style="opacity:.55">('+byType[t]+')</span></span></div>';
+  }});
+  lh+='<div style="margin-top:6px;border-top:1px solid rgba(0,220,130,0.18);padding-top:5px;">'
+    +'<div class="li"><div class="ld" style="background:rgba(52,152,219,0.8);box-shadow:0 0 5px #3498db88"></div>'
+    +'<span>Alert radius perimeter</span></div></div>';
+  legEl.innerHTML=lh;
+  bindCoords(wwd, document.getElementById('coords'));
+  wwd.redraw();
+}}
+"""
+    return _ww_page(
+        title_banner="LUMIRA INTELLIGENCE SYSTEM — ASSET PROTECTION MONITOR",
+        sysmode="ASSET SURVEILLANCE",
+        body_js=body_js,
         height=height,
-        margin=dict(l=0, r=0, t=0, b=0),
-        legend=dict(
-            bgcolor="rgba(255,255,255,0.85)",
-            font=dict(size=11),
-            bordercolor="#ccc",
-            borderwidth=1,
-        ),
-        paper_bgcolor="#0d1117",
     )
-
-
-def _circle_coords(lat: float, lon: float, radius_m: float, n: int = 72):
-    """Generate (lats, lons) tracing a geodesic circle — used for alert rings."""
-    R = 6_371_000.0
-    lats, lons = [], []
-    for i in range(n + 1):
-        angle = math.radians(i * 360 / n)
-        dlat = math.degrees(radius_m / R * math.cos(angle))
-        dlon = math.degrees(
-            radius_m / (R * math.cos(math.radians(lat))) * math.sin(angle)
-        )
-        lats.append(lat + dlat)
-        lons.append(lon + dlon)
-    return lats, lons
 
 
 # ── API helpers ───────────────────────────────────────────────────────────
@@ -593,29 +747,10 @@ elif page == PAGES[5]:
             }
             for e in geo_events
         ])
-        fig_events = go.Figure()
-        for evt_type, hex_color in EVENT_COLOURS.items():
-            subset = df_map[df_map["type"] == evt_type]
-            if subset.empty:
-                continue
-            fig_events.add_trace(go.Scattermap(
-                lat=subset["lat"],
-                lon=subset["lon"],
-                mode="markers",
-                name=evt_type,
-                marker=dict(
-                    size=subset["sev"] * 4 + 6,   # 10–26 px by severity
-                    color=hex_color,
-                    opacity=0.90,
-                ),
-                text=[
-                    f"<b>{r['title']}</b><br>{r['type']} | Severity {r['sev']}"
-                    for _, r in subset.iterrows()
-                ],
-                hoverinfo="text",
-            ))
-        fig_events.update_layout(**_osm_layout(lat=22.0, lon=82.0, zoom=4))
-        st.plotly_chart(fig_events, use_container_width=True)
+        st.components.v1.html(
+            _worldwind_events_html(geo_events, center_lat=22.0, center_lon=82.0),
+            height=650,
+        )
 
     # ── Table ─────────────────────────────────────────────────────────────
     st.subheader("Events Table")
@@ -814,48 +949,10 @@ elif page == PAGES[8]:
     # ── Map ───────────────────────────────────────────────────────────────
     geo_assets = [a for a in assets if a.get("latitude") and a.get("longitude")]
     if geo_assets:
-        asset_df = pd.DataFrame([
-            {
-                "lat":    a["latitude"],
-                "lon":    a["longitude"],
-                "name":   a["name"],
-                "type":   a.get("asset_type", "—"),
-                "radius": a.get("alert_radius_km", 5) * 1000,
-            }
-            for a in geo_assets
-        ])
-        fig_assets = go.Figure()
-        # Draw alert-radius ring for each asset (real geodesic circle)
-        for _, row in asset_df.iterrows():
-            c_lats, c_lons = _circle_coords(row["lat"], row["lon"], row["radius"])
-            fig_assets.add_trace(go.Scattermap(
-                lat=c_lats, lon=c_lons,
-                mode="lines",
-                line=dict(width=2, color="rgba(52,152,219,0.80)"),
-                fill="toself",
-                fillcolor="rgba(52,152,219,0.08)",
-                hoverinfo="skip",
-                showlegend=False,
-                name="",
-            ))
-        # Asset location markers on top
-        fig_assets.add_trace(go.Scattermap(
-            lat=asset_df["lat"],
-            lon=asset_df["lon"],
-            mode="markers+text",
-            name="Assets",
-            marker=dict(size=14, color="gold"),
-            text=asset_df["name"],
-            textposition="top right",
-            hovertext=[
-                f"<b>{r['name']}</b><br>Type: {r['type']}<br>"
-                f"Alert radius: {r['radius']/1000:.0f} km"
-                for _, r in asset_df.iterrows()
-            ],
-            hoverinfo="text",
-        ))
-        fig_assets.update_layout(**_osm_layout(lat=24.0, lon=78.0, zoom=4))
-        st.plotly_chart(fig_assets, use_container_width=True)
+        st.components.v1.html(
+            _worldwind_assets_html(geo_assets, center_lat=24.0, center_lon=78.0),
+            height=650,
+        )
 
     # ── Assets table ──────────────────────────────────────────────────────
     st.subheader(f"Assets ({len(assets)})")
