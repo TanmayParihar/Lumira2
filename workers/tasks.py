@@ -21,11 +21,21 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+import redis
 import structlog
 
 from workers.celery_app import app
 
 logger = structlog.get_logger(__name__)
+
+_rdb = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+
+def _svc_enabled(name: str) -> bool:
+    """Check Redis flag; default True if key absent or Redis unreachable."""
+    try:
+        return _rdb.get(f"lumira:svc:{name}") != "0"
+    except Exception:
+        return True
 
 
 # ════════════════════════════════════════════════════════════════
@@ -35,6 +45,9 @@ logger = structlog.get_logger(__name__)
 @app.task(name="workers.tasks.ingest_rss", bind=True, max_retries=2)
 def ingest_rss(self):
     """Crawl all configured RSS feeds and queue items for processing."""
+    if not _svc_enabled("rss"):
+        logger.info("task.ingest_rss.skipped", reason="disabled_via_dashboard")
+        return {"skipped": True}
     async def _run():
         from ingestion.rss_web import RSSIngester
         ingester = RSSIngester()
@@ -50,6 +63,9 @@ def ingest_rss(self):
 
 @app.task(name="workers.tasks.ingest_newsapi", bind=True, max_retries=2)
 def ingest_newsapi(self):
+    if not _svc_enabled("newsapi"):
+        logger.info("task.ingest_newsapi.skipped", reason="disabled_via_dashboard")
+        return {"skipped": True}
     async def _run():
         from ingestion.newsapi_client import NewsAPIIngester
         ingester = NewsAPIIngester()
@@ -65,6 +81,9 @@ def ingest_newsapi(self):
 
 @app.task(name="workers.tasks.ingest_serper", bind=True, max_retries=2)
 def ingest_serper(self):
+    if not _svc_enabled("serper"):
+        logger.info("task.ingest_serper.skipped", reason="disabled_via_dashboard")
+        return {"skipped": True}
     async def _run():
         from ingestion.serper_client import SerperIngester
         ingester = SerperIngester()
@@ -80,6 +99,9 @@ def ingest_serper(self):
 
 @app.task(name="workers.tasks.ingest_gdelt", bind=True, max_retries=2)
 def ingest_gdelt(self):
+    if not _svc_enabled("gdelt"):
+        logger.info("task.ingest_gdelt.skipped", reason="disabled_via_dashboard")
+        return {"skipped": True}
     async def _run():
         from ingestion.gdelt_osint import GDELTIngester
         ingester = GDELTIngester()

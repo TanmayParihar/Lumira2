@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 import json as _json
 import pandas as pd
+import redis as _redis
 import plotly.express as px
 import plotly.graph_objects as go
 import requests
@@ -21,6 +22,26 @@ import streamlit as st
 # ── Config ────────────────────────────────────────────────────────────────
 API_BASE = "http://localhost:8000"
 TIMEOUT  = 30   # seconds
+
+# ── Redis service-control helpers ─────────────────────────────────────────
+_SVC_REDIS_KEY = "lumira:svc:{}"   # lumira:svc:serper, lumira:svc:rss, …
+
+def _rdb():
+    return _redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+
+def svc_enabled(name: str) -> bool:
+    """Return True unless the service has been explicitly disabled in Redis."""
+    try:
+        val = _rdb().get(_SVC_REDIS_KEY.format(name))
+        return val != "0"          # missing key → default enabled
+    except Exception:
+        return True                # Redis unreachable → don't block
+
+def svc_set(name: str, enabled: bool) -> None:
+    try:
+        _rdb().set(_SVC_REDIS_KEY.format(name), "1" if enabled else "0")
+    except Exception:
+        st.error("Redis unreachable — cannot save service state")
 
 st.set_page_config(
     page_title="Lumira Dashboard",
@@ -736,6 +757,36 @@ elif page == PAGES[3]:
 elif page == PAGES[4]:
     st.title("📡 Ingestion Control")
 
+    # ── Service ON / OFF toggles ──────────────────────────────────────────
+    st.subheader("🔌 Service Control")
+    st.caption("Toggle scheduled ingestion on/off. Changes take effect on the next scheduled run.")
+
+    SERVICES = {
+        "rss":     ("RSS Feeds",  "Every 5 min"),
+        "newsapi": ("NewsAPI",    "Every 10 min"),
+        "serper":  ("Serper",     "Every 10 min"),
+        "gdelt":   ("GDELT",      "Every 15 min"),
+    }
+
+    svc_cols = st.columns(len(SERVICES))
+    for col, (key, (label, schedule)) in zip(svc_cols, SERVICES.items()):
+        with col:
+            current = svc_enabled(key)
+            status_color = "🟢" if current else "🔴"
+            st.markdown(f"**{label}**  \n`{schedule}`")
+            if current:
+                if st.button(f"⏹ Stop {label}", key=f"svc_stop_{key}",
+                             use_container_width=True, type="primary"):
+                    svc_set(key, False)
+                    st.rerun()
+            else:
+                if st.button(f"▶ Start {label}", key=f"svc_start_{key}",
+                             use_container_width=True):
+                    svc_set(key, True)
+                    st.rerun()
+            st.caption(f"{status_color} {'Running' if current else 'Stopped'}")
+
+    st.divider()
     # ── Manual triggers ───────────────────────────────────────────────────
     st.subheader("Trigger Ingesters")
     st.caption("Fires Celery tasks immediately (worker must be running)")
