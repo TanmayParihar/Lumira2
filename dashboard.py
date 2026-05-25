@@ -103,8 +103,7 @@ _WW_BOOT_JS = """
 function loadWW(cb) {
   function tryLoad(url, fallback) {
     var s = document.createElement('script');
-    s.src = url;
-    s.onload = cb;
+    s.src = url; s.onload = cb;
     s.onerror = fallback || function(){};
     document.head.appendChild(s);
   }
@@ -115,22 +114,84 @@ function loadWW(cb) {
     }
   );
 }
+
 function baseGlobe(canvasId, cLat, cLon, rangeM) {
   WorldWind.Logger.setLoggingLevel(WorldWind.Logger.LEVEL_WARNING);
   var wwd = new WorldWind.WorldWindow(canvasId);
   wwd.navigator.lookAtLocation.latitude  = cLat;
   wwd.navigator.lookAtLocation.longitude = cLon;
   wwd.navigator.range = rangeM || 5.8e6;
-  var stars = new WorldWind.StarFieldLayer(); stars.time = new Date();
-  var atmo  = new WorldWind.AtmosphereLayer(); atmo.time = new Date();
+
+  // ── Layer stack (bottom → top) ───────────────────────────────────────
+  // 1. Starfield — black space background
+  var stars = new WorldWind.StarFieldLayer();
+  stars.time = new Date();
   wwd.addLayer(stars);
+
+  // 2. Atmospheric limb glow
+  var atmo = new WorldWind.AtmosphereLayer();
+  atmo.time = new Date();
   wwd.addLayer(atmo);
-  wwd.addLayer(new WorldWind.BMNGOneImageLayer());
-  wwd.addLayer(new WorldWind.BMNGLandsatLayer());
+
+  // 3. NASA GIBS Black Marble (VIIRS Earth-at-Night composite).
+  //    City lights on pure black — loads at every zoom level.
+  //    GIBS (gibs.earthdata.nasa.gov) is actively maintained by NASA;
+  //    the old WorldWind tile server (worldwind26.arc.nasa.gov) is archived/offline.
+  var nightOk = false;
+  try {
+    var ub = new WorldWind.WmsUrlBuilder(
+      'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi',
+      'VIIRS_Black_Marble', '', '1.1.1'
+    );
+    var nightLyr = new WorldWind.WmsTiledImageLayer(
+      WorldWind.Sector.FULL_SPHERE,
+      36,           // levelZeroDeltaLatLon — standard WGS84 geographic tiling
+      9,            // numLevels — enough for city-scale zoom (≈ 500m/px at level 8)
+      'image/jpeg',
+      ub,
+      'BlackMarble'
+    );
+    nightLyr.displayName = 'Black Marble';
+    nightLyr.opacity = 1.0;
+    wwd.addLayer(nightLyr);
+    nightOk = true;
+  } catch(e) { console.warn('GIBS WMS unavailable, using BMNG fallback', e); }
+
+  if (!nightOk) {
+    // Fallback: single Blue Marble image (offline / CORS failure)
+    wwd.addLayer(new WorldWind.BMNGOneImageLayer());
+  }
+
+  // 4. Country & coast outlines in tactical green
+  //    Drawn as SurfacePolygon outlines (no fill) from Natural Earth 110m GeoJSON.
+  //    jsDelivr proxies GitHub content with proper CORS headers.
+  var borderLyr = new WorldWind.RenderableLayer('Borders');
+  borderLyr.opacity = 0.85;
+  wwd.addLayer(borderLyr);
+
+  var bAt = new WorldWind.ShapeAttributes(null);
+  bAt.drawInterior = false;
+  bAt.drawOutline   = true;
+  bAt.outlineColor  = new WorldWind.Color(0.0, 0.88, 0.50, 0.58);
+  bAt.outlineWidth  = 0.9;
+
+  try {
+    var gp = new WorldWind.GeoJSONParser(
+      'https://cdn.jsdelivr.net/gh/nvkelso/natural-earth-vector@master/geojson/ne_110m_admin_0_countries.geojson'
+    );
+    gp.load(
+      null,
+      function(geo, props) { return { attributes: bAt }; },
+      borderLyr
+    );
+  } catch(e) { console.warn('Country borders unavailable', e); }
+
+  // 5. Navigation chrome (compass + zoom/pan controls)
   wwd.addLayer(new WorldWind.CompassLayer());
   wwd.addLayer(new WorldWind.ViewControlsLayer(wwd));
   return wwd;
 }
+
 function hexWW(h, a) {
   return new WorldWind.Color(
     parseInt(h.slice(1,3),16)/255,
@@ -138,16 +199,18 @@ function hexWW(h, a) {
     parseInt(h.slice(5,7),16)/255,
     a!==undefined ? a : 0.9);
 }
+
 function bindCoords(wwd, el) {
   wwd.addEventListener('mousemove', function(ev) {
     var pp = wwd.canvasCoordinates(ev.clientX, ev.clientY);
     var to = wwd.pickTerrain(pp).terrainObject();
     if (to && to.position) {
-      var p = to.position, alt = Math.round(wwd.navigator.range/1000);
+      var p = to.position, alt = Math.round(wwd.navigator.range / 1000);
       el.innerHTML =
-        'LAT : '+ p.latitude.toFixed(4) +'&deg;&nbsp;&nbsp; LON : '+ p.longitude.toFixed(4) +'&deg;<br>'+
-        'ALT : '+ alt +' km &nbsp;&nbsp; GRID: '+
-        (Math.floor(p.latitude/10)*10)+'/'+(Math.floor(p.longitude/10)*10);
+        'LAT : ' + p.latitude.toFixed(4)  + '&deg; &nbsp;&nbsp;' +
+        'LON : ' + p.longitude.toFixed(4) + '&deg;<br>' +
+        'ALT : ' + alt + ' km &nbsp;&nbsp;' +
+        'GRID: ' + (Math.floor(p.latitude/10)*10) + '/' + (Math.floor(p.longitude/10)*10);
     }
   });
 }
@@ -169,7 +232,7 @@ def _ww_page(title_banner: str, sysmode: str, body_js: str,
   <div class="corner bl"></div><div class="corner br"></div>
   <div class="cls">&#9646; {title_banner} &#9646;</div>
   <div class="sysinfo">SYSTEM &nbsp;: ONLINE<br>MODE &nbsp;&nbsp;&nbsp;: {sysmode}<br>
-    SOURCE &nbsp;: LIVE FEED<br>EPOCH &nbsp;&nbsp;: <span id="ep">--</span></div>
+    IMAGERY: BLACK MARBLE / GIBS<br>EPOCH &nbsp;&nbsp;: <span id="ep">--</span></div>
   <div class="coords" id="coords">LAT : --.----&deg; &nbsp; LON : --.----&deg;<br>
     ALT : ---- km &nbsp; GRID: --/--</div>
   {hud_extra}
