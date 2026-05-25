@@ -14,7 +14,6 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import pydeck as pdk
 import requests
 import streamlit as st
 
@@ -54,63 +53,62 @@ def dti_colour(score: float) -> str:
     return "#2ecc71"
 
 
-# ── Globe map helpers ─────────────────────────────────────────────────────
-# Dark map style with no label clutter — works without a Mapbox token
-_GLOBE_STYLE    = "https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json"
-# Natural-Earth 110 m country polygons (public CartoDB CDN, ~180 KB)
-_COUNTRIES_URL  = (
-    "https://d2ad6b4ur7yvpq.cloudfront.net/"
-    "naturalearth-3.3.0/ne_110m_admin_0_countries.geojson"
-)
+# ── Globe map helpers (Plotly orthographic projection) ────────────────────
+# True 3D sphere — draggable, no API key needed, Plotly already installed.
+# Uses orthographic projection which renders the Earth as a genuine sphere
+# just like Google Earth, with full rotation via mouse drag.
 
-# Per-event-type RGB base colours (same palette as the sidebar chips)
-_EVENT_RGB: Dict[str, list] = {
-    "VIOLENCE":       [231, 76,  60],
-    "TERRORISM":      [192, 57,  43],
-    "DISASTER":       [155, 89,  182],
-    "PROTEST":        [230, 126, 34],
-    "CRIME":          [211, 84,  0],
-    "MILITARY":       [52,  152, 219],
-    "POLITICAL":      [41,  128, 185],
-    "HEALTH":         [39,  174, 96],
-    "INFRASTRUCTURE": [127, 140, 141],
-    "ACCIDENT":       [243, 156, 18],
-    "UNKNOWN":        [149, 165, 166],
-}
-
-def _fill_rgba(event_type: str, alpha: int = 90) -> list:
-    """Semi-transparent fill so the map shows through the circle."""
-    r, g, b = _EVENT_RGB.get(event_type, [149, 165, 166])
-    return [r, g, b, alpha]
-
-def _ring_rgba(event_type: str, alpha: int = 255) -> list:
-    """Solid ring outline — full opacity so it pops against the globe."""
-    r, g, b = _EVENT_RGB.get(event_type, [149, 165, 166])
-    return [r, g, b, alpha]
-
-def _wireframe_layer() -> pdk.Layer:
-    """Cyan country-border GeoJSON layer — the 'wireframe of Earth' effect."""
-    return pdk.Layer(
-        "GeoJsonLayer",
-        data=_COUNTRIES_URL,
-        stroked=True,
-        filled=False,
-        line_width_min_pixels=1,
-        get_line_color=[0, 220, 255, 55],   # dim cyan border
-    )
-
-def _globe_deck(layers: list, lat: float = 22.5, lon: float = 82.0,
-                zoom: float = 2.0, pitch: float = 25.0,
-                tooltip: dict | None = None) -> pdk.Deck:
-    """Return a pydeck Deck with GlobeView + wireframe country layer pre-added."""
-    return pdk.Deck(
-        views=[pdk.View(type="GlobeView", controller=True)],
-        layers=[_wireframe_layer()] + layers,
-        initial_view_state=pdk.ViewState(
-            latitude=lat, longitude=lon, zoom=zoom, pitch=pitch
+def _globe_layout(center_lon: float = 82.0, center_lat: float = 22.0,
+                  height: int = 580) -> dict:
+    """
+    Shared Plotly layout for both the Events and Assets globe maps.
+    Orthographic projection = true sphere.  Country outlines + lat/lon grid
+    give the 'wireframe of Earth' look on a near-black background.
+    """
+    return dict(
+        geo=dict(
+            projection_type="orthographic",
+            projection=dict(
+                rotation=dict(lon=center_lon, lat=center_lat, roll=0)
+            ),
+            # ── Land / ocean colours ──────────────────────────────────────
+            showland=True,
+            landcolor="rgb(12, 22, 38)",        # very dark navy — sphere visible
+            showocean=True,
+            oceancolor="rgb(5, 10, 22)",         # slightly different dark
+            showlakes=True,
+            lakecolor="rgb(5, 10, 22)",
+            # ── Wireframe outlines ────────────────────────────────────────
+            showcountries=True,
+            countrycolor="rgba(0, 200, 255, 0.50)",   # cyan country borders
+            countrywidth=0.7,
+            showcoastlines=True,
+            coastlinecolor="rgba(0, 230, 255, 0.70)",  # brighter coastlines
+            coastlinewidth=0.9,
+            showframe=False,
+            bgcolor="rgb(0, 0, 0)",                    # black space background
+            # ── Lat / lon grid (adds to the 'wireframe' feel) ────────────
+            lataxis=dict(
+                showgrid=True,
+                gridcolor="rgba(0, 130, 190, 0.20)",
+                dtick=30,
+            ),
+            lonaxis=dict(
+                showgrid=True,
+                gridcolor="rgba(0, 130, 190, 0.20)",
+                dtick=30,
+            ),
         ),
-        map_style=_GLOBE_STYLE,
-        tooltip=tooltip or {"text": ""},
+        paper_bgcolor="rgb(0, 5, 15)",
+        plot_bgcolor="rgb(0, 5, 15)",
+        height=height,
+        margin=dict(l=0, r=0, t=0, b=0),
+        legend=dict(
+            bgcolor="rgba(0,5,15,0.7)",
+            font=dict(color="white", size=11),
+            bordercolor="rgba(0,200,255,0.3)",
+            borderwidth=1,
+        ),
     )
 
 
@@ -557,36 +555,33 @@ elif page == PAGES[5]:
             }
             for e in geo_events
         ])
-        # Pre-compute colours in Python — JS ternary expressions in get_color
-        # are not evaluated by pydeck and produce solid-black circles.
-        df_map["fill"]   = [_fill_rgba(t, 90)  for t in df_map["type"]]
-        df_map["ring"]   = [_ring_rgba(t, 255) for t in df_map["type"]]
-        # Radius in metres: severity drives size, capped so circles stay readable
-        df_map["radius"] = df_map["sev"] * 22000
-
-        events_layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=df_map,
-            get_position=["lon", "lat"],
-            get_fill_color="fill",        # semi-transparent interior
-            get_line_color="ring",        # solid bright ring outline
-            get_radius="radius",
-            radius_min_pixels=4,          # never shrinks below 4 px
-            radius_max_pixels=28,         # never grows beyond 28 px
-            stroked=True,
-            filled=True,
-            line_width_min_pixels=2,
-            pickable=True,
-        )
-        st.pydeck_chart(
-            _globe_deck(
-                [events_layer],
-                lat=22.5, lon=82.0, zoom=2.0, pitch=25.0,
-                tooltip={"text": "{title}\n{type} | Severity {sev}"},
-            ),
-            use_container_width=True,
-            height=520,
-        )
+        # One Scattergeo trace per event-type so the legend is colour-coded
+        # and each group can be toggled on/off by clicking the legend.
+        fig_events = go.Figure()
+        for evt_type, hex_color in EVENT_COLOURS.items():
+            subset = df_map[df_map["type"] == evt_type]
+            if subset.empty:
+                continue
+            fig_events.add_trace(go.Scattergeo(
+                lon=subset["lon"],
+                lat=subset["lat"],
+                mode="markers",
+                name=evt_type,
+                marker=dict(
+                    size=subset["sev"] * 5 + 4,   # severity → size (9–29 px)
+                    color=hex_color,
+                    opacity=0.88,
+                    line=dict(width=1.5, color="rgba(255,255,255,0.75)"),
+                    symbol="circle",
+                ),
+                text=[
+                    f"<b>{r['title']}</b><br>{r['type']} | Severity {r['sev']}"
+                    for _, r in subset.iterrows()
+                ],
+                hoverinfo="text",
+            ))
+        fig_events.update_layout(**_globe_layout(center_lon=82.0, center_lat=22.0))
+        st.plotly_chart(fig_events, use_container_width=True)
 
     # ── Table ─────────────────────────────────────────────────────────────
     st.subheader("Events Table")
@@ -795,44 +790,43 @@ elif page == PAGES[8]:
             }
             for a in geo_assets
         ])
-        # Layer 1 — alert-radius ring: large circle, nearly transparent fill,
-        #           bright blue outline so you can see the perimeter clearly.
-        ring_layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=asset_df,
-            get_position=["lon", "lat"],
-            get_fill_color=[52, 152, 219, 20],    # almost invisible fill
-            get_line_color=[52, 152, 219, 210],   # bright blue perimeter
-            get_radius="radius",
-            stroked=True,
-            filled=True,
-            line_width_min_pixels=2,
-            pickable=False,
-        )
-        # Layer 2 — asset location dot: small solid gold marker on top.
-        dot_layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=asset_df,
-            get_position=["lon", "lat"],
-            get_fill_color=[255, 215, 0, 240],    # gold dot
-            get_line_color=[255, 255, 255, 200],  # white outline
-            get_radius=6000,                       # fixed 6 km dot
-            radius_min_pixels=6,
-            radius_max_pixels=14,
-            stroked=True,
-            filled=True,
-            line_width_min_pixels=1,
-            pickable=True,
-        )
-        st.pydeck_chart(
-            _globe_deck(
-                [ring_layer, dot_layer],
-                lat=24.0, lon=78.0, zoom=2.0, pitch=25.0,
-                tooltip={"text": "{name}\n{type}\nAlert radius: {radius}m"},
+        fig_assets = go.Figure()
+        # Trace 1 — alert-radius bubble: large translucent circle with blue ring
+        fig_assets.add_trace(go.Scattergeo(
+            lon=asset_df["lon"], lat=asset_df["lat"],
+            mode="markers", name="Alert radius",
+            marker=dict(
+                size=[r * 1.4 + 14 for r in asset_df["radius"] / 1000],
+                color="rgba(52,152,219,0.12)",
+                line=dict(width=2, color="rgba(52,152,219,0.85)"),
             ),
-            use_container_width=True,
-            height=520,
-        )
+            text=[
+                f"<b>{r['name']}</b><br>Type: {r['type']}<br>Alert radius: {r['radius']/1000:.0f} km"
+                for _, r in asset_df.iterrows()
+            ],
+            hoverinfo="text", showlegend=True,
+        ))
+        # Trace 2 — asset location dot: gold diamond on top
+        fig_assets.add_trace(go.Scattergeo(
+            lon=asset_df["lon"], lat=asset_df["lat"],
+            mode="markers+text", name="Asset",
+            marker=dict(
+                size=10,
+                color="rgba(255,215,0,0.92)",
+                line=dict(width=1.5, color="white"),
+                symbol="diamond",
+            ),
+            text=asset_df["name"],
+            textposition="top center",
+            textfont=dict(color="rgba(255,255,255,0.8)", size=9),
+            hovertext=[
+                f"<b>{r['name']}</b><br>Type: {r['type']}"
+                for _, r in asset_df.iterrows()
+            ],
+            hoverinfo="text",
+        ))
+        fig_assets.update_layout(**_globe_layout(center_lon=78.0, center_lat=24.0))
+        st.plotly_chart(fig_assets, use_container_width=True)
 
     # ── Assets table ──────────────────────────────────────────────────────
     st.subheader(f"Assets ({len(assets)})")
