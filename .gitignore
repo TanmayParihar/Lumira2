@@ -1,0 +1,54 @@
+# ── Python ────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environment ───────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Environment / secrets ─────────────────────────────────
+.env
+# Keep the example file
+!.env.example
+
+# ── Logs & PIDs ───────────────────────────────────────────
+logs/
+*.log
+*.pid
+
+# ── Media / binary data ───────────────────────────────────
+media/
+data/
+
+# ── Services (downloaded binaries) ───────────────────────
+services/
+
+# ── Celery beat schedule ──────────────────────────────────
+celerybeat-schedule.*
+
+# ── IDE / OS ──────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Test / coverage ───────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+
+# ── Alembic (generated migrations auto-excluded unless committed) ─
+# alembic/versions/   # keep migrations if you add them
+.claude/
