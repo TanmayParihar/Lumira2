@@ -11,11 +11,13 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+import folium
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+from streamlit_folium import st_folium
 
 # ── Config ────────────────────────────────────────────────────────────────
 API_BASE = "http://localhost:8000"
@@ -109,6 +111,17 @@ def _globe_layout(center_lon: float = 82.0, center_lat: float = 22.0,
             bordercolor="rgba(0,200,255,0.3)",
             borderwidth=1,
         ),
+    )
+
+
+# ── Folium map helper ─────────────────────────────────────────────────────
+def _base_map(lat: float = 22.0, lon: float = 82.0, zoom: int = 5) -> folium.Map:
+    """Dark CartoDB map with full road/building/place detail, no API key needed."""
+    return folium.Map(
+        location=[lat, lon],
+        zoom_start=zoom,
+        tiles="CartoDB dark_matter",
+        control_scale=True,
     )
 
 
@@ -555,33 +568,26 @@ elif page == PAGES[5]:
             }
             for e in geo_events
         ])
-        # One Scattergeo trace per event-type so the legend is colour-coded
-        # and each group can be toggled on/off by clicking the legend.
-        fig_events = go.Figure()
-        for evt_type, hex_color in EVENT_COLOURS.items():
-            subset = df_map[df_map["type"] == evt_type]
-            if subset.empty:
-                continue
-            fig_events.add_trace(go.Scattergeo(
-                lon=subset["lon"],
-                lat=subset["lat"],
-                mode="markers",
-                name=evt_type,
-                marker=dict(
-                    size=subset["sev"] * 5 + 4,   # severity → size (9–29 px)
-                    color=hex_color,
-                    opacity=0.88,
-                    line=dict(width=1.5, color="rgba(255,255,255,0.75)"),
-                    symbol="circle",
+        m_events = _base_map(lat=22.0, lon=82.0, zoom=5)
+        for _, row in df_map.iterrows():
+            color = EVENT_COLOURS.get(row["type"], "#95a5a6")
+            radius_px = int(row["sev"]) * 4 + 5   # 9–25 px based on severity
+            folium.CircleMarker(
+                location=[row["lat"], row["lon"]],
+                radius=radius_px,
+                color="white",
+                weight=1,
+                fill=True,
+                fill_color=color,
+                fill_opacity=0.85,
+                tooltip=folium.Tooltip(
+                    f"<b>{row['title']}</b><br>"
+                    f"<span style='color:{color}'>{row['type']}</span>"
+                    f" | Severity {row['sev']}",
+                    sticky=True,
                 ),
-                text=[
-                    f"<b>{r['title']}</b><br>{r['type']} | Severity {r['sev']}"
-                    for _, r in subset.iterrows()
-                ],
-                hoverinfo="text",
-            ))
-        fig_events.update_layout(**_globe_layout(center_lon=82.0, center_lat=22.0))
-        st.plotly_chart(fig_events, use_container_width=True)
+            ).add_to(m_events)
+        st_folium(m_events, use_container_width=True, height=540, returned_objects=[])
 
     # ── Table ─────────────────────────────────────────────────────────────
     st.subheader("Events Table")
@@ -790,43 +796,33 @@ elif page == PAGES[8]:
             }
             for a in geo_assets
         ])
-        fig_assets = go.Figure()
-        # Trace 1 — alert-radius bubble: large translucent circle with blue ring
-        fig_assets.add_trace(go.Scattergeo(
-            lon=asset_df["lon"], lat=asset_df["lat"],
-            mode="markers", name="Alert radius",
-            marker=dict(
-                size=[r * 1.4 + 14 for r in asset_df["radius"] / 1000],
-                color="rgba(52,152,219,0.12)",
-                line=dict(width=2, color="rgba(52,152,219,0.85)"),
-            ),
-            text=[
-                f"<b>{r['name']}</b><br>Type: {r['type']}<br>Alert radius: {r['radius']/1000:.0f} km"
-                for _, r in asset_df.iterrows()
-            ],
-            hoverinfo="text", showlegend=True,
-        ))
-        # Trace 2 — asset location dot: gold diamond on top
-        fig_assets.add_trace(go.Scattergeo(
-            lon=asset_df["lon"], lat=asset_df["lat"],
-            mode="markers+text", name="Asset",
-            marker=dict(
-                size=10,
-                color="rgba(255,215,0,0.92)",
-                line=dict(width=1.5, color="white"),
-                symbol="diamond",
-            ),
-            text=asset_df["name"],
-            textposition="top center",
-            textfont=dict(color="rgba(255,255,255,0.8)", size=9),
-            hovertext=[
-                f"<b>{r['name']}</b><br>Type: {r['type']}"
-                for _, r in asset_df.iterrows()
-            ],
-            hoverinfo="text",
-        ))
-        fig_assets.update_layout(**_globe_layout(center_lon=78.0, center_lat=24.0))
-        st.plotly_chart(fig_assets, use_container_width=True)
+        m_assets = _base_map(lat=24.0, lon=78.0, zoom=5)
+        for _, row in asset_df.iterrows():
+            # Alert-radius ring (real metres on the map)
+            folium.Circle(
+                location=[row["lat"], row["lon"]],
+                radius=row["radius"],           # metres
+                color="#3498db",
+                weight=2,
+                fill=True,
+                fill_color="#3498db",
+                fill_opacity=0.07,
+                tooltip=folium.Tooltip(
+                    f"<b>{row['name']}</b><br>"
+                    f"Type: {row['type']}<br>"
+                    f"Alert radius: {row['radius']/1000:.0f} km",
+                    sticky=True,
+                ),
+            ).add_to(m_assets)
+            # Asset location pin
+            folium.Marker(
+                location=[row["lat"], row["lon"]],
+                tooltip=folium.Tooltip(
+                    f"<b>{row['name']}</b><br>{row['type']}", sticky=True
+                ),
+                icon=folium.Icon(color="orange", icon="star", prefix="fa"),
+            ).add_to(m_assets)
+        st_folium(m_assets, use_container_width=True, height=540, returned_objects=[])
 
     # ── Assets table ──────────────────────────────────────────────────────
     st.subheader(f"Assets ({len(assets)})")
