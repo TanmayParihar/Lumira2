@@ -11,13 +11,12 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-import folium
+import math
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import requests
 import streamlit as st
-from streamlit_folium import st_folium
 
 # ── Config ────────────────────────────────────────────────────────────────
 API_BASE = "http://localhost:8000"
@@ -114,15 +113,41 @@ def _globe_layout(center_lon: float = 82.0, center_lat: float = 22.0,
     )
 
 
-# ── Folium map helper ─────────────────────────────────────────────────────
-def _base_map(lat: float = 22.0, lon: float = 82.0, zoom: int = 5) -> folium.Map:
-    """Dark CartoDB map with full road/building/place detail, no API key needed."""
-    return folium.Map(
-        location=[lat, lon],
-        zoom_start=zoom,
-        tiles="CartoDB dark_matter",
-        control_scale=True,
+# ── OSM map helpers (Plotly go.Scattermap — OpenStreetMap, no API key) ────
+def _osm_layout(lat: float = 22.0, lon: float = 82.0,
+                zoom: int = 4, height: int = 540) -> dict:
+    """Shared layout for go.Scattermap with full OpenStreetMap tile detail."""
+    return dict(
+        map=dict(
+            style="open-street-map",      # free OSM tiles, roads/buildings/places
+            center=dict(lat=lat, lon=lon),
+            zoom=zoom,
+        ),
+        height=height,
+        margin=dict(l=0, r=0, t=0, b=0),
+        legend=dict(
+            bgcolor="rgba(255,255,255,0.85)",
+            font=dict(size=11),
+            bordercolor="#ccc",
+            borderwidth=1,
+        ),
+        paper_bgcolor="#0d1117",
     )
+
+
+def _circle_coords(lat: float, lon: float, radius_m: float, n: int = 72):
+    """Generate (lats, lons) tracing a geodesic circle — used for alert rings."""
+    R = 6_371_000.0
+    lats, lons = [], []
+    for i in range(n + 1):
+        angle = math.radians(i * 360 / n)
+        dlat = math.degrees(radius_m / R * math.cos(angle))
+        dlon = math.degrees(
+            radius_m / (R * math.cos(math.radians(lat))) * math.sin(angle)
+        )
+        lats.append(lat + dlat)
+        lons.append(lon + dlon)
+    return lats, lons
 
 
 # ── API helpers ───────────────────────────────────────────────────────────
@@ -568,26 +593,29 @@ elif page == PAGES[5]:
             }
             for e in geo_events
         ])
-        m_events = _base_map(lat=22.0, lon=82.0, zoom=5)
-        for _, row in df_map.iterrows():
-            color = EVENT_COLOURS.get(row["type"], "#95a5a6")
-            radius_px = int(row["sev"]) * 4 + 5   # 9–25 px based on severity
-            folium.CircleMarker(
-                location=[row["lat"], row["lon"]],
-                radius=radius_px,
-                color="white",
-                weight=1,
-                fill=True,
-                fill_color=color,
-                fill_opacity=0.85,
-                tooltip=folium.Tooltip(
-                    f"<b>{row['title']}</b><br>"
-                    f"<span style='color:{color}'>{row['type']}</span>"
-                    f" | Severity {row['sev']}",
-                    sticky=True,
+        fig_events = go.Figure()
+        for evt_type, hex_color in EVENT_COLOURS.items():
+            subset = df_map[df_map["type"] == evt_type]
+            if subset.empty:
+                continue
+            fig_events.add_trace(go.Scattermap(
+                lat=subset["lat"],
+                lon=subset["lon"],
+                mode="markers",
+                name=evt_type,
+                marker=dict(
+                    size=subset["sev"] * 4 + 6,   # 10–26 px by severity
+                    color=hex_color,
+                    opacity=0.90,
                 ),
-            ).add_to(m_events)
-        st_folium(m_events, use_container_width=True, height=540, returned_objects=[])
+                text=[
+                    f"<b>{r['title']}</b><br>{r['type']} | Severity {r['sev']}"
+                    for _, r in subset.iterrows()
+                ],
+                hoverinfo="text",
+            ))
+        fig_events.update_layout(**_osm_layout(lat=22.0, lon=82.0, zoom=4))
+        st.plotly_chart(fig_events, use_container_width=True)
 
     # ── Table ─────────────────────────────────────────────────────────────
     st.subheader("Events Table")
@@ -796,33 +824,38 @@ elif page == PAGES[8]:
             }
             for a in geo_assets
         ])
-        m_assets = _base_map(lat=24.0, lon=78.0, zoom=5)
+        fig_assets = go.Figure()
+        # Draw alert-radius ring for each asset (real geodesic circle)
         for _, row in asset_df.iterrows():
-            # Alert-radius ring (real metres on the map)
-            folium.Circle(
-                location=[row["lat"], row["lon"]],
-                radius=row["radius"],           # metres
-                color="#3498db",
-                weight=2,
-                fill=True,
-                fill_color="#3498db",
-                fill_opacity=0.07,
-                tooltip=folium.Tooltip(
-                    f"<b>{row['name']}</b><br>"
-                    f"Type: {row['type']}<br>"
-                    f"Alert radius: {row['radius']/1000:.0f} km",
-                    sticky=True,
-                ),
-            ).add_to(m_assets)
-            # Asset location pin
-            folium.Marker(
-                location=[row["lat"], row["lon"]],
-                tooltip=folium.Tooltip(
-                    f"<b>{row['name']}</b><br>{row['type']}", sticky=True
-                ),
-                icon=folium.Icon(color="orange", icon="star", prefix="fa"),
-            ).add_to(m_assets)
-        st_folium(m_assets, use_container_width=True, height=540, returned_objects=[])
+            c_lats, c_lons = _circle_coords(row["lat"], row["lon"], row["radius"])
+            fig_assets.add_trace(go.Scattermap(
+                lat=c_lats, lon=c_lons,
+                mode="lines",
+                line=dict(width=2, color="rgba(52,152,219,0.80)"),
+                fill="toself",
+                fillcolor="rgba(52,152,219,0.08)",
+                hoverinfo="skip",
+                showlegend=False,
+                name="",
+            ))
+        # Asset location markers on top
+        fig_assets.add_trace(go.Scattermap(
+            lat=asset_df["lat"],
+            lon=asset_df["lon"],
+            mode="markers+text",
+            name="Assets",
+            marker=dict(size=14, color="gold"),
+            text=asset_df["name"],
+            textposition="top right",
+            hovertext=[
+                f"<b>{r['name']}</b><br>Type: {r['type']}<br>"
+                f"Alert radius: {r['radius']/1000:.0f} km"
+                for _, r in asset_df.iterrows()
+            ],
+            hoverinfo="text",
+        ))
+        fig_assets.update_layout(**_osm_layout(lat=24.0, lon=78.0, zoom=4))
+        st.plotly_chart(fig_assets, use_container_width=True)
 
     # ── Assets table ──────────────────────────────────────────────────────
     st.subheader(f"Assets ({len(assets)})")
