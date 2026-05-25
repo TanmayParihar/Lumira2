@@ -62,33 +62,37 @@ def dti_colour(score: float) -> str:
 
 _WW_CSS = """
 * { margin:0; padding:0; box-sizing:border-box; }
-html, body { width:100%; height:HHpx; background:#00000f; overflow:hidden;
+html, body { width:100%; height:HHpx; background:#000812; overflow:hidden;
              font-family:'Courier New',Courier,monospace; }
-canvas#ww { width:100% !important; height:HHpx !important; display:block; }
+/* Stealth blue monochrome: desaturate → darken → sepia → hue-rotate into blue → boost.
+   Earth terrain relief (mountains, coasts, deserts) stays visible as subtle blue shading.
+   Event markers also turn blue (like sonar / radar pings). */
+canvas#ww { width:100% !important; height:HHpx !important; display:block;
+  filter: saturate(0) brightness(0.35) sepia(1) hue-rotate(185deg) saturate(4) brightness(0.82); }
 .hud { position:fixed; top:0; left:0; right:0; bottom:0;
        pointer-events:none; z-index:20; }
 .corner { position:absolute; width:28px; height:28px;
-          border-color:rgba(0,230,140,0.65); border-style:solid; }
+          border-color:rgba(0,170,255,0.55); border-style:solid; }
 .tl { top:8px;    left:8px;   border-width:2px 0 0 2px; }
 .tr { top:8px;    right:8px;  border-width:2px 2px 0 0; }
 .bl { bottom:8px; left:8px;   border-width:0 0 2px 2px; }
 .br { bottom:8px; right:8px;  border-width:0 2px 2px 0; }
 .cls { position:absolute; top:10px; left:50%; transform:translateX(-50%);
-       color:rgba(0,255,128,0.88); font-size:10px; font-weight:bold;
+       color:rgba(80,200,255,0.88); font-size:10px; font-weight:bold;
        letter-spacing:3px; white-space:nowrap;
-       text-shadow:0 0 12px rgba(0,255,128,0.55); }
+       text-shadow:0 0 12px rgba(80,200,255,0.55); }
 .sysinfo { position:absolute; top:30px; left:14px;
-           color:rgba(0,200,110,0.62); font-size:8px; line-height:1.8;
-           letter-spacing:1px; text-shadow:0 0 6px rgba(0,200,110,0.3); }
+           color:rgba(60,180,240,0.58); font-size:8px; line-height:1.8;
+           letter-spacing:1px; text-shadow:0 0 6px rgba(60,180,240,0.3); }
 .coords  { position:absolute; bottom:14px; left:14px;
-           color:rgba(0,230,140,0.80); font-size:9px; line-height:1.8;
-           text-shadow:0 0 6px rgba(0,230,140,0.4); }
+           color:rgba(80,200,255,0.78); font-size:9px; line-height:1.8;
+           text-shadow:0 0 6px rgba(80,200,255,0.4); }
 .legend  { position:absolute; top:34px; right:12px; min-width:178px;
-           background:rgba(0,10,5,0.84); border:1px solid rgba(0,220,130,0.22);
-           padding:9px 13px; font-size:9px; color:rgba(0,220,130,0.85);
+           background:rgba(0,6,18,0.86); border:1px solid rgba(60,170,255,0.22);
+           padding:9px 13px; font-size:9px; color:rgba(80,200,255,0.85);
            backdrop-filter:blur(3px); }
 .ltitle  { font-weight:bold; letter-spacing:2px; font-size:8px;
-           border-bottom:1px solid rgba(0,220,130,0.18);
+           border-bottom:1px solid rgba(60,170,255,0.18);
            padding-bottom:4px; margin-bottom:5px; }
 .li  { display:flex; align-items:center; gap:7px; margin:3px 0; }
 .ld  { width:9px; height:9px; border-radius:50%; flex-shrink:0; }
@@ -96,7 +100,7 @@ canvas#ww { width:100% !important; height:HHpx !important; display:block; }
         background:repeating-linear-gradient(0deg,transparent,transparent 2px,
         rgba(0,0,0,0.042) 2px,rgba(0,0,0,0.042) 4px); }
 #ldr { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
-       color:rgba(0,255,128,0.8); font-size:12px; letter-spacing:3px; z-index:100; }
+       color:rgba(80,200,255,0.8); font-size:12px; letter-spacing:3px; z-index:100; }
 """
 
 _WW_BOOT_JS = """
@@ -122,71 +126,37 @@ function baseGlobe(canvasId, cLat, cLon, rangeM) {
   wwd.navigator.lookAtLocation.longitude = cLon;
   wwd.navigator.range = rangeM || 5.8e6;
 
-  // ── Layer stack (bottom → top) ───────────────────────────────────────
-  // 1. Starfield — black space background
+  // 1. Starfield — black space behind globe
   var stars = new WorldWind.StarFieldLayer();
   stars.time = new Date();
   wwd.addLayer(stars);
 
-  // 2. Atmospheric limb glow
+  // 2. Atmospheric limb glow (blue haze on edge)
   var atmo = new WorldWind.AtmosphereLayer();
   atmo.time = new Date();
   wwd.addLayer(atmo);
 
-  // 3. NASA GIBS Black Marble (VIIRS Earth-at-Night composite).
-  //    City lights on pure black — loads at every zoom level.
-  //    GIBS (gibs.earthdata.nasa.gov) is actively maintained by NASA;
-  //    the old WorldWind tile server (worldwind26.arc.nasa.gov) is archived/offline.
-  var nightOk = false;
-  try {
-    var ub = new WorldWind.WmsUrlBuilder(
-      'https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi',
-      'VIIRS_Black_Marble', '', '1.1.1'
-    );
-    var nightLyr = new WorldWind.WmsTiledImageLayer(
-      WorldWind.Sector.FULL_SPHERE,
-      36,           // levelZeroDeltaLatLon — standard WGS84 geographic tiling
-      9,            // numLevels — enough for city-scale zoom (≈ 500m/px at level 8)
-      'image/jpeg',
-      ub,
-      'BlackMarble'
-    );
-    nightLyr.displayName = 'Black Marble';
-    nightLyr.opacity = 1.0;
-    wwd.addLayer(nightLyr);
-    nightOk = true;
-  } catch(e) { console.warn('GIBS WMS unavailable, using BMNG fallback', e); }
+  // 3. Blue Marble (single baked-in image — always loads, no tile server needed).
+  //    The CSS filter on the canvas converts this into stealth monochrome blue
+  //    while preserving terrain relief (mountains, coasts, deserts as blue shading).
+  wwd.addLayer(new WorldWind.BMNGOneImageLayer());
 
-  if (!nightOk) {
-    // Fallback: single Blue Marble image (offline / CORS failure)
-    wwd.addLayer(new WorldWind.BMNGOneImageLayer());
-  }
-
-  // 4. Country & coast outlines in tactical green
-  //    Drawn as SurfacePolygon outlines (no fill) from Natural Earth 110m GeoJSON.
-  //    jsDelivr proxies GitHub content with proper CORS headers.
+  // 4. Country / coast borders in pale blue (matches monochrome theme)
   var borderLyr = new WorldWind.RenderableLayer('Borders');
-  borderLyr.opacity = 0.85;
   wwd.addLayer(borderLyr);
-
   var bAt = new WorldWind.ShapeAttributes(null);
   bAt.drawInterior = false;
-  bAt.drawOutline   = true;
-  bAt.outlineColor  = new WorldWind.Color(0.0, 0.88, 0.50, 0.58);
-  bAt.outlineWidth  = 0.9;
-
+  bAt.drawOutline  = true;
+  bAt.outlineColor = new WorldWind.Color(0.55, 0.82, 1.0, 0.50);
+  bAt.outlineWidth = 1.0;
   try {
     var gp = new WorldWind.GeoJSONParser(
       'https://cdn.jsdelivr.net/gh/nvkelso/natural-earth-vector@master/geojson/ne_110m_admin_0_countries.geojson'
     );
-    gp.load(
-      null,
-      function(geo, props) { return { attributes: bAt }; },
-      borderLyr
-    );
-  } catch(e) { console.warn('Country borders unavailable', e); }
+    gp.load(null, function(g, p) { return {attributes: bAt}; }, borderLyr);
+  } catch(e) {}
 
-  // 5. Navigation chrome (compass + zoom/pan controls)
+  // 5. Compass + view controls
   wwd.addLayer(new WorldWind.CompassLayer());
   wwd.addLayer(new WorldWind.ViewControlsLayer(wwd));
   return wwd;
@@ -232,7 +202,7 @@ def _ww_page(title_banner: str, sysmode: str, body_js: str,
   <div class="corner bl"></div><div class="corner br"></div>
   <div class="cls">&#9646; {title_banner} &#9646;</div>
   <div class="sysinfo">SYSTEM &nbsp;: ONLINE<br>MODE &nbsp;&nbsp;&nbsp;: {sysmode}<br>
-    IMAGERY: BLACK MARBLE / GIBS<br>EPOCH &nbsp;&nbsp;: <span id="ep">--</span></div>
+    IMAGERY: BMNG / STEALTH<br>EPOCH &nbsp;&nbsp;: <span id="ep">--</span></div>
   <div class="coords" id="coords">LAT : --.----&deg; &nbsp; LON : --.----&deg;<br>
     ALT : ---- km &nbsp; GRID: --/--</div>
   {hud_extra}
@@ -269,32 +239,69 @@ var EVENTS={ev_js}, COLORS={col_js}, C_LAT={center_lat}, C_LON={center_lon};
 function init(){{
   document.getElementById('ldr').style.display='none';
   var wwd = baseGlobe('ww', C_LAT, C_LON, 5.8e6);
+
   var evtLyr = new WorldWind.RenderableLayer('Events');
   wwd.addLayer(evtLyr);
-  var byType={{}};
+
+  var RINGS = 3;        // concentric ripple rings per event
+  var CYCLE = 2500;     // ms for one full expand-and-fade cycle
+  var ripples = [];
+  var byType = {{}};
+
   EVENTS.forEach(function(e){{
-    var ch = COLORS[e.type]||'#95a5a6';
-    var at = new WorldWind.ShapeAttributes(null);
-    at.drawInterior=true; at.interiorColor=hexWW(ch,0.70);
-    at.drawOutline=true;  at.outlineColor=new WorldWind.Color(1,1,1,0.80);
-    at.outlineWidth=1.5;
-    var hi = new WorldWind.ShapeAttributes(at);
-    hi.interiorColor=hexWW(ch,1.0); hi.outlineWidth=2.5;
-    var r = 45000 + (e.sev-1)*15000;
-    var c = new WorldWind.SurfaceCircle(new WorldWind.Location(e.lat,e.lon),r,at);
-    c.highlightAttributes=hi; c._e=e;
-    evtLyr.addRenderable(c);
-    byType[e.type]=(byType[e.type]||0)+1;
+    var ch  = COLORS[e.type] || '#95a5a6';
+    var loc = new WorldWind.Location(e.lat, e.lon);
+    var maxR = 50000 + (e.sev - 1) * 18000;   // 50-122 km
+
+    // ── centre dot (always visible, bright) ──
+    var dAt = new WorldWind.ShapeAttributes(null);
+    dAt.drawInterior = true;
+    dAt.interiorColor = hexWW(ch, 0.92);
+    dAt.drawOutline = true;
+    dAt.outlineColor = new WorldWind.Color(1,1,1,0.70);
+    dAt.outlineWidth = 1.2;
+    evtLyr.addRenderable(
+      new WorldWind.SurfaceCircle(loc, 9000, dAt));
+
+    // ── ripple rings (animated) ──
+    for (var i = 0; i < RINGS; i++) {{
+      var rAt = new WorldWind.ShapeAttributes(null);
+      rAt.drawInterior = false;
+      rAt.drawOutline  = true;
+      rAt.outlineColor = hexWW(ch, 0.88);
+      rAt.outlineWidth = 2.0;
+      var ring = new WorldWind.SurfaceCircle(loc, 1, rAt);
+      evtLyr.addRenderable(ring);
+      ripples.push({{ c: ring, maxR: maxR, phase: i / RINGS, hex: ch }});
+    }}
+    byType[e.type] = (byType[e.type] || 0) + 1;
   }});
-  var legEl=document.getElementById('leg');
-  var lh='<div class="ltitle">&#9658; THREAT CLASSIFICATION</div>';
+
+  // ── animation loop: expand rings, fade alpha, reset ──
+  setInterval(function(){{
+    var t = (Date.now() % CYCLE) / CYCLE;            // 0 → 1
+    for (var i = 0; i < ripples.length; i++) {{
+      var r = ripples[i];
+      var p = (t + r.phase) % 1.0;                  // staggered phase
+      r.c.radius = r.maxR * p;                      // expand outward
+      var a = 0.88 * (1.0 - p);                     // fade as it grows
+      r.c.attributes.outlineColor = hexWW(r.hex, a);
+      r.c.attributes.outlineWidth = 2.2 - 1.2 * p;  // thinner at edge
+    }}
+    wwd.redraw();
+  }}, 50);   // ~20 fps
+
+  // ── legend ──
+  var legEl = document.getElementById('leg');
+  var lh = '<div class="ltitle">&#9658; THREAT CLASSIFICATION</div>';
   Object.keys(COLORS).forEach(function(t){{
-    if(!byType[t]) return;
-    var cc=COLORS[t];
-    lh+='<div class="li"><div class="ld" style="background:'+cc+';box-shadow:0 0 5px '+cc+'88"></div>'
-       +'<span>'+t+' <span style="opacity:.55">('+byType[t]+')</span></span></div>';
+    if (!byType[t]) return;
+    lh += '<div class="li"><div class="ld" style="background:'+COLORS[t]
+        + ';box-shadow:0 0 5px '+COLORS[t]+'88"></div><span>'+t
+        + ' <span style="opacity:.55">('+byType[t]+')</span></span></div>';
   }});
-  legEl.innerHTML=lh;
+  legEl.innerHTML = lh;
+
   bindCoords(wwd, document.getElementById('coords'));
   wwd.redraw();
 }}
@@ -327,34 +334,70 @@ function init(){{
   var wwd = baseGlobe('ww', C_LAT, C_LON, 5.8e6);
   var lyr = new WorldWind.RenderableLayer('Assets');
   wwd.addLayer(lyr);
-  var byType={{}};
+  var RINGS = 2, CYCLE = 3000, ripples = [];
+  var byType = {{}};
+
   ASSETS.forEach(function(a){{
-    // Alert-radius ring
+    var loc = new WorldWind.Location(a.lat, a.lon);
+
+    // ── alert-radius perimeter ring (static) ──
     var rAt = new WorldWind.ShapeAttributes(null);
-    rAt.drawInterior=true;  rAt.interiorColor=new WorldWind.Color(0.20,0.60,0.86,0.07);
-    rAt.drawOutline=true;   rAt.outlineColor=new WorldWind.Color(0.20,0.60,0.86,0.82);
-    rAt.outlineWidth=2;
-    lyr.addRenderable(new WorldWind.SurfaceCircle(
-      new WorldWind.Location(a.lat,a.lon), a.radius, rAt));
-    // Asset dot (gold)
+    rAt.drawInterior = true;
+    rAt.interiorColor = new WorldWind.Color(0.20, 0.60, 0.86, 0.06);
+    rAt.drawOutline   = true;
+    rAt.outlineColor  = new WorldWind.Color(0.20, 0.60, 0.86, 0.75);
+    rAt.outlineWidth  = 2;
+    lyr.addRenderable(new WorldWind.SurfaceCircle(loc, a.radius, rAt));
+
+    // ── asset centre dot (bright) ──
     var dAt = new WorldWind.ShapeAttributes(null);
-    dAt.drawInterior=true;  dAt.interiorColor=new WorldWind.Color(1,0.84,0,0.92);
-    dAt.drawOutline=true;   dAt.outlineColor=new WorldWind.Color(1,1,1,1);
-    dAt.outlineWidth=2;
-    lyr.addRenderable(new WorldWind.SurfaceCircle(
-      new WorldWind.Location(a.lat,a.lon), 14000, dAt));
-    byType[a.type]=(byType[a.type]||0)+1;
+    dAt.drawInterior = true;
+    dAt.interiorColor = new WorldWind.Color(1, 0.84, 0, 0.92);
+    dAt.drawOutline   = true;
+    dAt.outlineColor  = new WorldWind.Color(1, 1, 1, 1);
+    dAt.outlineWidth  = 2;
+    lyr.addRenderable(new WorldWind.SurfaceCircle(loc, 12000, dAt));
+
+    // ── slow radar sweep inside the radius ──
+    for (var i = 0; i < RINGS; i++) {{
+      var sAt = new WorldWind.ShapeAttributes(null);
+      sAt.drawInterior = false;
+      sAt.drawOutline  = true;
+      sAt.outlineColor = new WorldWind.Color(0.20, 0.60, 0.86, 0.70);
+      sAt.outlineWidth = 1.8;
+      var ring = new WorldWind.SurfaceCircle(loc, 1, sAt);
+      lyr.addRenderable(ring);
+      ripples.push({{ c: ring, maxR: a.radius, phase: i / RINGS }});
+    }}
+    byType[a.type] = (byType[a.type] || 0) + 1;
   }});
-  var legEl=document.getElementById('leg');
-  var lh='<div class="ltitle">&#9658; ASSET CLASSIFICATION</div>';
+
+  // ── animation loop ──
+  setInterval(function(){{
+    var t = (Date.now() % CYCLE) / CYCLE;
+    for (var i = 0; i < ripples.length; i++) {{
+      var r = ripples[i];
+      var p = (t + r.phase) % 1.0;
+      r.c.radius = r.maxR * p;
+      var a = 0.70 * (1.0 - p);
+      r.c.attributes.outlineColor = new WorldWind.Color(0.20, 0.60, 0.86, a);
+      r.c.attributes.outlineWidth = 1.8 - 0.8 * p;
+    }}
+    wwd.redraw();
+  }}, 50);
+
+  // ── legend ──
+  var legEl = document.getElementById('leg');
+  var lh = '<div class="ltitle">&#9658; ASSET CLASSIFICATION</div>';
   Object.keys(byType).forEach(function(t){{
-    lh+='<div class="li"><div class="ld" style="background:#ffd700;box-shadow:0 0 5px #ffd70088"></div>'
-       +'<span>'+t+' <span style="opacity:.55">('+byType[t]+')</span></span></div>';
+    lh += '<div class="li"><div class="ld" style="background:#ffd700;box-shadow:0 0 5px #ffd70088"></div>'
+        + '<span>'+t+' <span style="opacity:.55">('+byType[t]+')</span></span></div>';
   }});
-  lh+='<div style="margin-top:6px;border-top:1px solid rgba(0,220,130,0.18);padding-top:5px;">'
-    +'<div class="li"><div class="ld" style="background:rgba(52,152,219,0.8);box-shadow:0 0 5px #3498db88"></div>'
-    +'<span>Alert radius perimeter</span></div></div>';
-  legEl.innerHTML=lh;
+  lh += '<div style="margin-top:6px;border-top:1px solid rgba(60,170,255,0.18);padding-top:5px;">'
+      + '<div class="li"><div class="ld" style="background:rgba(52,152,219,0.8);box-shadow:0 0 5px #3498db88"></div>'
+      + '<span>Alert perimeter + sweep</span></div></div>';
+  legEl.innerHTML = lh;
+
   bindCoords(wwd, document.getElementById('coords'));
   wwd.redraw();
 }}
