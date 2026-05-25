@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import pydeck as pdk
 import requests
 import streamlit as st
 
@@ -51,6 +52,66 @@ def dti_colour(score: float) -> str:
     if score >= 50: return "#e67e22"
     if score >= 25: return "#f1c40f"
     return "#2ecc71"
+
+
+# ── Globe map helpers ─────────────────────────────────────────────────────
+# Dark map style with no label clutter — works without a Mapbox token
+_GLOBE_STYLE    = "https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json"
+# Natural-Earth 110 m country polygons (public CartoDB CDN, ~180 KB)
+_COUNTRIES_URL  = (
+    "https://d2ad6b4ur7yvpq.cloudfront.net/"
+    "naturalearth-3.3.0/ne_110m_admin_0_countries.geojson"
+)
+
+# Per-event-type RGB base colours (same palette as the sidebar chips)
+_EVENT_RGB: Dict[str, list] = {
+    "VIOLENCE":       [231, 76,  60],
+    "TERRORISM":      [192, 57,  43],
+    "DISASTER":       [155, 89,  182],
+    "PROTEST":        [230, 126, 34],
+    "CRIME":          [211, 84,  0],
+    "MILITARY":       [52,  152, 219],
+    "POLITICAL":      [41,  128, 185],
+    "HEALTH":         [39,  174, 96],
+    "INFRASTRUCTURE": [127, 140, 141],
+    "ACCIDENT":       [243, 156, 18],
+    "UNKNOWN":        [149, 165, 166],
+}
+
+def _fill_rgba(event_type: str, alpha: int = 90) -> list:
+    """Semi-transparent fill so the map shows through the circle."""
+    r, g, b = _EVENT_RGB.get(event_type, [149, 165, 166])
+    return [r, g, b, alpha]
+
+def _ring_rgba(event_type: str, alpha: int = 255) -> list:
+    """Solid ring outline — full opacity so it pops against the globe."""
+    r, g, b = _EVENT_RGB.get(event_type, [149, 165, 166])
+    return [r, g, b, alpha]
+
+def _wireframe_layer() -> pdk.Layer:
+    """Cyan country-border GeoJSON layer — the 'wireframe of Earth' effect."""
+    return pdk.Layer(
+        "GeoJsonLayer",
+        data=_COUNTRIES_URL,
+        stroked=True,
+        filled=False,
+        line_width_min_pixels=1,
+        get_line_color=[0, 220, 255, 55],   # dim cyan border
+    )
+
+def _globe_deck(layers: list, lat: float = 22.5, lon: float = 82.0,
+                zoom: float = 2.0, pitch: float = 25.0,
+                tooltip: dict | None = None) -> pdk.Deck:
+    """Return a pydeck Deck with GlobeView + wireframe country layer pre-added."""
+    return pdk.Deck(
+        views=[pdk.View(type="GlobeView", controller=True)],
+        layers=[_wireframe_layer()] + layers,
+        initial_view_state=pdk.ViewState(
+            latitude=lat, longitude=lon, zoom=zoom, pitch=pitch
+        ),
+        map_style=_GLOBE_STYLE,
+        tooltip=tooltip or {"text": ""},
+    )
 
 
 # ── API helpers ───────────────────────────────────────────────────────────
@@ -496,28 +557,36 @@ elif page == PAGES[5]:
             }
             for e in geo_events
         ])
-        import pydeck as pdk
-        layer = pdk.Layer(
+        # Pre-compute colours in Python — JS ternary expressions in get_color
+        # are not evaluated by pydeck and produce solid-black circles.
+        df_map["fill"]   = [_fill_rgba(t, 90)  for t in df_map["type"]]
+        df_map["ring"]   = [_ring_rgba(t, 255) for t in df_map["type"]]
+        # Radius in metres: severity drives size, capped so circles stay readable
+        df_map["radius"] = df_map["sev"] * 22000
+
+        events_layer = pdk.Layer(
             "ScatterplotLayer",
             data=df_map,
             get_position=["lon", "lat"],
-            get_color=[
-                "type == 'VIOLENCE' ? [231,76,60] : "
-                "type == 'TERRORISM' ? [192,57,43] : "
-                "type == 'DISASTER' ? [155,89,182] : "
-                "type == 'PROTEST' ? [230,126,34] : "
-                "[52,152,219]"
-            ],
-            get_radius="sev * 15000",
+            get_fill_color="fill",        # semi-transparent interior
+            get_line_color="ring",        # solid bright ring outline
+            get_radius="radius",
+            radius_min_pixels=4,          # never shrinks below 4 px
+            radius_max_pixels=28,         # never grows beyond 28 px
+            stroked=True,
+            filled=True,
+            line_width_min_pixels=2,
             pickable=True,
-            opacity=0.7,
         )
-        view = pdk.ViewState(latitude=22.5, longitude=82.0, zoom=4, pitch=0)
-        st.pydeck_chart(pdk.Deck(
-            layers=[layer], initial_view_state=view,
-            tooltip={"text": "{title}\n{type} | Severity {sev}"},
-            map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
-        ))
+        st.pydeck_chart(
+            _globe_deck(
+                [events_layer],
+                lat=22.5, lon=82.0, zoom=2.0, pitch=25.0,
+                tooltip={"text": "{title}\n{type} | Severity {sev}"},
+            ),
+            use_container_width=True,
+            height=520,
+        )
 
     # ── Table ─────────────────────────────────────────────────────────────
     st.subheader("Events Table")
@@ -716,7 +785,6 @@ elif page == PAGES[8]:
     # ── Map ───────────────────────────────────────────────────────────────
     geo_assets = [a for a in assets if a.get("latitude") and a.get("longitude")]
     if geo_assets:
-        import pydeck as pdk
         asset_df = pd.DataFrame([
             {
                 "lat":    a["latitude"],
@@ -727,23 +795,44 @@ elif page == PAGES[8]:
             }
             for a in geo_assets
         ])
-        layer = pdk.Layer(
+        # Layer 1 — alert-radius ring: large circle, nearly transparent fill,
+        #           bright blue outline so you can see the perimeter clearly.
+        ring_layer = pdk.Layer(
             "ScatterplotLayer",
             data=asset_df,
             get_position=["lon", "lat"],
-            get_color=[52, 152, 219, 200],
+            get_fill_color=[52, 152, 219, 20],    # almost invisible fill
+            get_line_color=[52, 152, 219, 210],   # bright blue perimeter
             get_radius="radius",
-            pickable=True,
             stroked=True,
-            get_line_color=[255, 255, 255],
+            filled=True,
             line_width_min_pixels=2,
+            pickable=False,
         )
-        view = pdk.ViewState(latitude=24.0, longitude=78.0, zoom=4)
-        st.pydeck_chart(pdk.Deck(
-            layers=[layer], initial_view_state=view,
-            tooltip={"text": "{name}\n{type}\nAlert radius: {radius}m"},
-            map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
-        ))
+        # Layer 2 — asset location dot: small solid gold marker on top.
+        dot_layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=asset_df,
+            get_position=["lon", "lat"],
+            get_fill_color=[255, 215, 0, 240],    # gold dot
+            get_line_color=[255, 255, 255, 200],  # white outline
+            get_radius=6000,                       # fixed 6 km dot
+            radius_min_pixels=6,
+            radius_max_pixels=14,
+            stroked=True,
+            filled=True,
+            line_width_min_pixels=1,
+            pickable=True,
+        )
+        st.pydeck_chart(
+            _globe_deck(
+                [ring_layer, dot_layer],
+                lat=24.0, lon=78.0, zoom=2.0, pitch=25.0,
+                tooltip={"text": "{name}\n{type}\nAlert radius: {radius}m"},
+            ),
+            use_container_width=True,
+            height=520,
+        )
 
     # ── Assets table ──────────────────────────────────────────────────────
     st.subheader(f"Assets ({len(assets)})")
