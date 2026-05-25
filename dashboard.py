@@ -140,6 +140,7 @@ function baseGlobe(canvasId, cLat, cLon, rangeM) {
   //    The CSS filter on the canvas converts this into stealth monochrome blue
   //    while preserving terrain relief (mountains, coasts, deserts as blue shading).
   wwd.addLayer(new WorldWind.BMNGOneImageLayer());
+  wwd.addLayer(new WorldWind.BMNGLandsatLayer());
 
   // 4. Country / coast borders in pale blue (matches monochrome theme)
   var borderLyr = new WorldWind.RenderableLayer('Borders');
